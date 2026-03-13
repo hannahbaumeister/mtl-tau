@@ -71,7 +71,7 @@ DRY_RUN=false
 DEBUG=false
 
 # SLURM resource defaults (edit to match your cluster)
-PARTITION_SEG="gpu"          # partition with GPUs for segmentation
+PARTITION_SEG="core"         # partition with GPUs for segmentation
 PARTITION_SURF="core"        # partition for surface reconstruction
 NUM_CPUS_SEG=16              # cpus per task for segmentation
 NUM_CPUS_SURF=2              # cpus per case for surface reconstruction
@@ -158,24 +158,24 @@ head -n 2 "$IMAGE_PATH_LIST" > "${IMAGE_PATH_LIST}.tmp" \
 
 
 # -----------------------------------------------------------------------------
-# create flat symlink directory
+# create flat data directory
 # -----------------------------------------------------------------------------
 
-SYMLINK_DIR="${COHORT_WORK_DIR}/t1w_links"
-mkdir -p "$SYMLINK_DIR"
-info "Creating symlinks in: ${SYMLINK_DIR}"
+DATA_DIR="${COHORT_WORK_DIR}/t1w_data"
+mkdir -p "$DATA_DIR"
+info "Copying T1w images to: ${DATA_DIR}"
 
-n_links=0
+n_copied=0
 
 while IFS= read -r t1_path; do
     [[ -z "$t1_path" ]] && continue
-    link_name=$(basename "$t1_path")
-    ln -sf "$t1_path" "${SYMLINK_DIR}/${link_name}"
-    (( n_links++ )) || true
+    fname=$(basename "$t1_path")
+    cp "$t1_path" "${DATA_DIR}/${fname}"
+    (( n_copied++ )) || true
 done < "$IMAGE_PATH_LIST"
 
-info "Created ${n_links} symlink(s)."
-[[ "$n_links" -eq 0 ]] && error "No symlinks were created — nothing to submit."
+info "Copied ${n_copied} image(s)."
+[[ "$n_copied" -eq 0 ]] && error "No images were copied — nothing to submit."
 
 
 # -----------------------------------------------------------------------------
@@ -202,7 +202,6 @@ info "FastSurfer work directory: ${FASTSURFER_WORK_DIR}"
 info "Staging singularity image and support files..."
 
 if ! $DRY_RUN; then
-    cp "$FASTSURFER_SIF"       "${COHORT_WORK_DIR}/images/fastsurfer.sif"
     cp "$FREESURFER_LICENSE"   "${COHORT_WORK_DIR}/scripts/.fs_license"
     cp "${TO_FASTSURFER_TOOLS}/brun_fastsurfer.sh" \
        "${TO_FASTSURFER_TOOLS}/stools.sh" \
@@ -248,13 +247,16 @@ fi
 SEG_SCRIPT="${COHORT_WORK_DIR}/scripts/slurm_seg.sh"
 SEG_TIMELIMIT=$(( TIMELIMIT_SEG_MIN * real_cases_per_task + 5 ))
 
+# note: no partition is assigned for the segmentation because bianca seems to be 
+# directing jobs with gpu constraint (-C gpu) to the node partition
 cat > "$SEG_SCRIPT" <<SEGSCRIPT
 #!/bin/bash
 #SBATCH --job-name=FastSurfer-Seg
-#SBATCH --partition=${PARTITION_SEG}
 #SBATCH --cpus-per-task=${NUM_CPUS_SEG}
 #SBATCH --mem=${MEM_SEG_GB}G
-#SBATCH --gpus-per-task=1
+#SBATCH --gres=gpu:1
+#SBATCH -C gpu
+#SBATCH -A sens2023026
 #SBATCH --time=${SEG_TIMELIMIT}
 ${ARRAY_OPT:+#SBATCH ${ARRAY_OPT}}
 #SBATCH --output=${COHORT_WORK_DIR}/logs/seg_%A_%a.log
@@ -262,12 +264,12 @@ ${ARRAY_OPT:+#SBATCH ${ARRAY_OPT}}
 module load singularity
 
 singularity exec --nv \\
-  -B "${COHORT_WORK_DIR}:/data,${SYMLINK_DIR}:/source:ro" \\
+  -B "${COHORT_WORK_DIR}:/data,${DATA_DIR}:/source:ro" \\
   --no-mount home,cwd --cleanenv \\
   --env TQDM_DISABLE=1 \\
   --env SLURM_ARRAY_TASK_ID=\$SLURM_ARRAY_TASK_ID \\
   --env SLURM_ARRAY_TASK_COUNT=\$SLURM_ARRAY_TASK_COUNT \\
-  "${COHORT_WORK_DIR}/images/fastsurfer.sif" \\
+  ${FASTSURFER_SIF} \\
   /data/scripts/brun_fastsurfer.sh \\
     --subject_list /data/scripts/subject_list \\
     --statusfile   /data/scripts/subject_success \\
@@ -298,9 +300,9 @@ cat > "$SURF_SCRIPT" <<SURFSCRIPT
 #SBATCH --job-name=FastSurfer-Surf
 #SBATCH --partition=${PARTITION_SURF}
 #SBATCH --ntasks=${real_cases_per_task}
-#SBATCH --nodes=1-${real_cases_per_task}
 #SBATCH --cpus-per-task=${NUM_CPUS_SURF}
 #SBATCH --mem-per-cpu=${MEM_PER_CPU_SURF}G
+#SBATCH -A sens2023026
 #SBATCH --hint=nomultithread
 #SBATCH --time=${TIMELIMIT_SURF_MIN}
 ${ARRAY_OPT:+#SBATCH ${ARRAY_OPT}}
@@ -320,8 +322,8 @@ run_fastsurfer=(
     --hint=nomultithread
   singularity exec
     --no-mount home,cwd --cleanenv
-    -B "${COHORT_WORK_DIR}:/data,${SYMLINK_DIR}:/source:ro"
-    "${COHORT_WORK_DIR}/images/fastsurfer.sif"
+    -B "${COHORT_WORK_DIR}:/data,${DATA_DIR}:/source:ro"
+    "${FASTSURFER_SIF}"
     /fastsurfer/run_fastsurfer.sh
 )
 
@@ -352,6 +354,7 @@ cat > "$CLEANUP_SCRIPT" <<CLEANSCRIPT
 #SBATCH --job-name=FastSurfer-Cleanup
 #SBATCH --partition=${PARTITION_SURF}
 #SBATCH --ntasks=1
+#SBATCH -A sens2023026
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=4G
 #SBATCH --time=60
@@ -361,7 +364,7 @@ echo "Moving FastSurfer outputs to derivatives..."
 mv "${FASTSURFER_WORK_DIR}"/* "${COHORT_FASTSURFER_DIR}/"
 
 echo "Removing symlink directory..."
-rm -rf "${SYMLINK_DIR}"
+rm -rf "${DATA_DIR}"
 
 echo "Cleanup complete. Results in: ${COHORT_FASTSURFER_DIR}"
 CLEANSCRIPT
