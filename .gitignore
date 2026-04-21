@@ -1,0 +1,15 @@
+# Ignore everything
+*
+
+# But not these file types
+!*.r
+!*.R
+!*.py
+!*.sh
+!*.ipynb
+
+# And not directories (so git can traverse into them)
+!*/
+
+# And not .gitignore itself
+!.gitignore
