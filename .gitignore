@@ -13,3 +13,7 @@
 
 # And not .gitignore itself
 !.gitignore
+
+# Exclude specific folders
+data/
+results/
